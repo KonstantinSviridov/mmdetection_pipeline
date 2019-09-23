@@ -310,6 +310,13 @@ class PipelineConfig(generic.GenericImageTaskConfig):
 
         self.setNumClasses(modelCfg, 'bbox_head')
         self.setNumClasses(modelCfg, 'mask_head')
+        self.setNumClasses(modelCfg, 'mask_iou_head')
+
+        self.setImageScale(cfg.data, 'train', True)
+        self.setImageScale(cfg.data, 'test')
+        self.setImageScale(cfg.data, 'val')
+
+
 
         # # set cudnn_benchmark
         # if cfg.get('cudnn_benchmark', False):
@@ -330,6 +337,22 @@ class PipelineConfig(generic.GenericImageTaskConfig):
                 x['num_classes'] = self.classes + 1
         else:
             m['num_classes'] = self.classes + 1
+
+    def setImageScale(self, dataCfg, moduleTitle, multi=False):
+        if not moduleTitle in dataCfg:
+            return
+
+        m = dataCfg[moduleTitle]
+        shapesList = self.shape
+        if not isinstance(shapesList[0], list):
+            shapesList = [ shapesList ]
+
+        shapesList = [ tuple(x[:2]) for x in shapesList ]
+        value = shapesList
+        if not multi or len(shapesList) == 1:
+            value = shapesList[0]
+
+        m['img_scale'] = value
 
     def __setattr__(self, key, value):
         hasAttr = hasattr(self,key)
