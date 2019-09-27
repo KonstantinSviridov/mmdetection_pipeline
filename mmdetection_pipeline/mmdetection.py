@@ -280,6 +280,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.configPath = None
         self.weightsPath = None
         self.nativeConfig = None
+        self.imagesPerGpu = None
         super().__init__(**atrs)
         self.dataset_clazz = datasets.ImageKFoldedDataSet
         self.flipPred=False
@@ -294,16 +295,17 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         wd = os.path.dirname(self.path)
         cfg.work_dir = wd
 
-        if 'bbox_head' in cfg.model and hasattr(atrs,'classes'):
+        if 'bbox_head' in cfg.model and 'classes' in atrs:
             setCfgAttr(cfg.model.bbox_head, 'num_classes', atrs['classes']+1)
 
-        if 'mask_head' in cfg.model and hasattr(atrs,'classes'):
+        if 'mask_head' in cfg.model and 'classes' in atrs:
             setCfgAttr(cfg.model.mask_head, 'num_classes', atrs['classes']+1)
 
         cfg.load_from = self.getWeightsPath()
         cfg.model.pretrained = self.getWeightsPath()
         cfg.total_epochs = None  # need to have more epoch then the checkpoint has been generated for
-        cfg.data.imgs_per_gpu = max(1, self.batch // cfg.gpus)# batch size
+        if self.imagesPerGpu is not None:
+            cfg.data.imgs_per_gpu = self.imagesPerGpu
         cfg.data.workers_per_gpu = 1
         cfg.log_config.interval = 1
         modelCfg = cfg['model']
@@ -383,49 +385,14 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         pass
 
     def createNet(self):
-        # ac = self.all["activation"]
-        # if ac == "none":
-        #     ac = None
-        #
-        # self.all["activation"]=ac
-        # if self.architecture in custom_models:
-        #     clazz=custom_models[self.architecture]
-        # else: clazz = getattr(segmentation_models, self.architecture)
-        # t: configloader.Type = configloader.loaded['segmentation'].catalog['PipelineConfig']
-        # r = t.customProperties()
-        # cleaned = {}
-        # sig=inspect.signature(clazz)
-        # for arg in self.all:
-        #     pynama = t.alias(arg)
-        #     if not arg in r and pynama in sig.parameters:
-        #         cleaned[pynama] = self.all[arg]
-        #
-        # self.clean(cleaned)
-        #
-        #
-        # if self.crops is not None:
-        #     cleaned["input_shape"]=(cleaned["input_shape"][0]//self.crops,cleaned["input_shape"][1]//self.crops,cleaned["input_shape"][2])
-        #
-        # if cleaned["input_shape"][2]>3 and self.encoder_weights!=None and len(self.encoder_weights)>0:
-        #     if os.path.exists(self.path + ".mdl-nchannel"):
-        #         cleaned["encoder_weights"] = None
-        #         model = clazz(**cleaned)
-        #         model.load_weights(self.path + ".mdl-nchannel")
-        #         return  model
-        #
-        #     copy=cleaned.copy();
-        #     copy["input_shape"] = (cleaned["input_shape"][0] , cleaned["input_shape"][1] , 3)
-        #     model1=clazz(**copy);
-        #     cleaned["encoder_weights"]=None
-        #     model=clazz(**cleaned)
-        #     self.adaptNet(model,model1,self.copyWeights);
-        #     model.save_weights(self.path + ".mdl-nchannel")
-        #     return model
         classes = self.get_dataset().root().meta()['CLASSES']
         result = MMDetWrapper(self.nativeConfig, self.getWeightsPath(), classes)
 
         return result
 
+    def compile(self, net: keras.Model, opt: keras.optimizers.Optimizer, loss:str=None)->keras.Model:
+        net.compile(opt, None, None)
+        return net
 
     def evaluateAll(self,ds, fold:int,stage=-1,negatives="real",ttflips=None):
         folds = self.kfold(ds, range(0, len(ds)))
@@ -621,8 +588,9 @@ class MMdetWritableDS(CompressibleWriteableDS):
             np.savez_compressed(path, item)
 
     def loadItem(self, path:str):
+        npzFile = np.load(path,allow_pickle=True)
         if self.withMasks:
-            payload = np.load(path)["arr_0.npy"]
+            payload = npzFile["arr_0.npy"]
             bboxes = payload[0]
             masks = payload[1]
             if self.asUints:
@@ -636,9 +604,9 @@ class MMdetWritableDS(CompressibleWriteableDS):
 
         else:
             if self.asUints:
-                x=np.load(path)["arr_0.npy"].astype(np.float32)/self.scale
+                x= npzFile["arr_0.npy"].astype(np.float32) / self.scale
             else:
-                x=np.load(path)["arr_0.npy"]
+                x= npzFile["arr_0.npy"]
         return x;
 
 class DetectionStage(generic.Stage):
@@ -909,11 +877,12 @@ class MusketAnnotationInfo(MusketInfo):
 
     def _initializer(self, pi: PredictionItem):
         y = pi.y
-        self.labels = y[0]
-        self.bboxes = y[1]
+        if y is not None:
+            self.labels = y[0]
+            self.bboxes = y[1]
+            self.masks = y[2] if len(y)>2 else None
         self.bboxes_ignore = np.zeros(shape=(0,4),dtype=np.float32)
         self.labels_ignore = np.zeros((0),dtype=np.int64)
-        self.masks = y[2] if len(y)>2 else None
 
     def __getitem__(self, key):
         if key == "bboxes":
@@ -941,7 +910,8 @@ class MyDataSet(CustomDataset):
     def __init__(self, ds:DataSet, **kwargs):
         self.ds = ds
         args = kwargs.copy()
-        args.pop('type')
+        if 'type' in args:
+            args.pop('type')
         self.type = 'VOCDataset'
         self.img_infos = []
         super().__init__(**args)
@@ -1347,35 +1317,35 @@ class DrawSamplesHook(Hook):
                 bbox_result, segm_result = result
             else:
                 bbox_result, segm_result = result, None
-            bboxes = np.vstack(bbox_result) * scale
+            bboxes = np.vstack(bbox_result)
+            bboxes[:,:4] *= scale
+            numColors = len(imgaug.SegmentationMapsOnImage.DEFAULT_SEGMENT_COLORS)
             if segm_result is not None:
-                masksShape = list(imgOrig.shape)
-                masksShape[2] = len(self.dataset.CLASSES)
+                masksShape = list(imgOrig.shape[:2]) + [1]
                 gtMasks = r[1].y[2]
                 maskIndices = set()
+                objColor = 1
                 if gtMasks is not None:
-                    gtMasksArr = np.zeros(masksShape, dtype=np.float32)
+                    gtMasksArr = np.zeros(masksShape, dtype=np.int)
                     for i in range(len(gtLabels)):
                         l = gtLabels[i]
                         gtm = gtMasks[i]
-                        gtMasksArr[:,:,l] = gtm
-                        maskIndices.add(l)
+                        gtMasksArr[gtm > 0] = objColor
+                        objColor = 1 + (objColor + 1) % (numColors-1)
 
-                predMasksArr = np.zeros(masksShape, dtype=np.float32)
-                for i in range(len(gtLabels)):
+                predMasksArr = np.zeros(masksShape, dtype=np.int)
+                objColor = 1
+                for i in range(len(self.dataset.CLASSES)):
                     pm = segm_result[i]
                     if len(pm) > 0:
                         predMasksDecoded = [mask_util.decode(x) for x in pm]
                         for x in predMasksDecoded:
-                            predMasksArr[:,:,i] += x.astype(np.float32)
-                        maskIndices.add(i)
+                            predMasksArr[x > 0] = objColor
+                            objColor = 1 + (objColor + 1) % (numColors-1)
 
-                maskIndices = np.array(sorted(list(maskIndices)),dtype=np.int)
-                gtMasksArr = gtMasksArr[:,:,maskIndices]
-                predMasksArr = np.minimum(predMasksArr, 1.0)[:,:,maskIndices]
-
-                gtMaskImg = imgaug.augmentables.segmaps.SegmentationMapOnImage(gtMasksArr, imgOrig.shape).draw_on_image(imgOrig)
-                predMaskImg = imgaug.augmentables.segmaps.SegmentationMapOnImage(predMasksArr, imgOrig.shape).draw_on_image(imgOrig)
+                #CustomSegmentationMapOnImage(np.transpose(gtMasks, axes=(1,2,0)), imgOrig.shape).draw_on_image(imgOrig)
+                gtMaskImg = imgaug.SegmentationMapOnImage(gtMasksArr, imgOrig.shape).draw_on_image(imgOrig)[0]
+                predMaskImg = imgaug.SegmentationMapOnImage(predMasksArr, imgOrig.shape).draw_on_image(imgOrig)[0]
                 #predMaskImg = imgaug.HeatmapsOnImage(predMasksArr,imgOrig.shape).draw_on_image(imgOrig)
                 gtMaskedImages.append(imgaug.imresize_single_image(gtMaskImg, (newX, newY), 'cubic'))
                 predMaskedImages.append(imgaug.imresize_single_image(predMaskImg,(newX, newY), 'cubic'))
