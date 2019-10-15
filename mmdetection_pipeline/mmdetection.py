@@ -2,6 +2,7 @@ from collections import OrderedDict
 import types
 import mmcv
 import cv2
+from keras_metrics.metrics import bacc_positive
 from mmcv.image import imread, imwrite
 from mmcv.visualization.color import color_val
 from mmcv import Config
@@ -281,6 +282,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.weightsPath = None
         self.nativeConfig = None
         self.imagesPerGpu = None
+        self.resetHeads = True
         super().__init__(**atrs)
         self.dataset_clazz = datasets.ImageKFoldedDataSet
         self.flipPred=False
@@ -301,9 +303,14 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         if 'mask_head' in cfg.model and 'classes' in atrs:
             setCfgAttr(cfg.model.mask_head, 'num_classes', atrs['classes']+1)
 
-        cfg.load_from = self.getWeightsPath()
-        cfg.model.pretrained = self.getWeightsPath()
-        cfg.total_epochs = None  # need to have more epoch then the checkpoint has been generated for
+        weightsPath = self.getWeightsPath()
+        if self.weightsPath is not None:
+            cfg.load_from = weightsPath
+            cfg.model.pretrained = None #prevent weights form being loaded during model init
+
+        cfg.resetHeads = self.resetHeads
+
+        cfg.total_epochs = None
         if self.imagesPerGpu is not None:
             cfg.data.imgs_per_gpu = self.imagesPerGpu
         cfg.data.workers_per_gpu = 1
@@ -651,6 +658,12 @@ class DetectionStage(generic.Stage):
         train_indexes = train_indexes
         test_indexes = test_indexes
 
+        batchSize = self.cfg.imagesPerGpu * self.cfg.gpus
+        iterations = len(train_indexes) // (round(subsample * batchSize))
+        if kf.maxEpochSize is not None and kf.maxEpochSize < iterations:
+            iterations = min(iterations, kf.maxEpochSize)
+            train_indexes = train_indexes[:iterations * batchSize]
+
         trainDS = SubDataSet(kf.ds,train_indexes)
         valDS = SubDataSet(kf.ds, test_indexes)
 
@@ -658,9 +671,8 @@ class DetectionStage(generic.Stage):
 
         if v_steps < 1: v_steps = 1
 
-        iterations = len(train_indexes) // (round(subsample * kf.batchSize))
-        if kf.maxEpochSize is not None:
-            iterations = min(iterations, kf.maxEpochSize)
+
+
 
         cfg = model.cfg
         train_dataset = MyDataSet(ds=trainDS, **cfg.data.train)
@@ -1221,42 +1233,22 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
     if cfg.resume_from:
         runner.resume(cfg.resume_from)
     elif cfg.load_from:
-        # fc_cls_params_0 = runner.model.module.bbox_head[0].fc_cls._parameters
-        # fc_cls_params_1 = runner.model.module.bbox_head[1].fc_cls._parameters
-        # fc_cls_params_2 = runner.model.module.bbox_head[2].fc_cls._parameters
-        #
-        # conv_logits_params_0 = runner.model.module.mask_head[0].conv_logits._parameters
-        # conv_logits_params_1 = runner.model.module.mask_head[1].conv_logits._parameters
-        # conv_logits_params_2 = runner.model.module.mask_head[2].conv_logits._parameters
-        #
-        # runner.model.module.bbox_head[0].fc_cls._parameters = OrderedDict()
-        # runner.model.module.bbox_head[1].fc_cls._parameters = OrderedDict()
-        # runner.model.module.bbox_head[2].fc_cls._parameters = OrderedDict()
-        #
-        # runner.model.module.mask_head[0].conv_logits._parameters = OrderedDict()
-        # runner.model.module.mask_head[1].conv_logits._parameters = OrderedDict()
-        # runner.model.module.mask_head[2].conv_logits._parameters = OrderedDict()
+        weightsPath = cfg.load_from
+        if cfg.resetHeads:
+            noHeadWeightsPath = os.path.join(cfg.work_dir,"weights/pretrained_nohead.weights")
+            weights = torch.load(weightsPath)
+            weights['state_dict'] = {
+                k: v
+                for k, v in weights['state_dict'].items()
+                if not k.startswith('bbox_head') and not k.startswith('mask_head')
+            }
+            weightsDir = os.path.dirname(noHeadWeightsPath)
+            if not os.path.exists(weightsDir):
+                os.mkdir(weightsDir)
+            torch.save(weights, noHeadWeightsPath)
+            weightsPath = noHeadWeightsPath
 
-
-        runner.load_checkpoint(cfg.load_from)
-
-        # runner.model.module.bbox_head[0].fc_cls._parameters = fc_cls_params_0
-        # runner.model.module.bbox_head[1].fc_cls._parameters = fc_cls_params_1
-        # runner.model.module.bbox_head[2].fc_cls._parameters = fc_cls_params_2
-        #
-        # runner.model.module.mask_head[0].conv_logits._parameters = conv_logits_params_0
-        # runner.model.module.mask_head[1].conv_logits._parameters = conv_logits_params_1
-        # runner.model.module.mask_head[2].conv_logits._parameters = conv_logits_params_2
-
-
-
-        # # fc_cls_params = runner.model.module.bbox_head.fc_cls._parameters
-        # # fc_reg_params = runner.model.module.bbox_head.fc_reg._parameters
-        # # runner.model.module.bbox_head.fc_cls._parameters = OrderedDict()
-        # # runner.model.module.bbox_head.fc_reg._parameters = OrderedDict()
-        # runner.load_checkpoint(cfg.load_from)
-        # # runner.model.module.bbox_head.fc_cls._parameters = fc_cls_params
-        # # runner.model.module.bbox_head.fc_reg._parameters = fc_reg_params
+        runner.load_checkpoint(weightsPath)
     return runner
 
 
