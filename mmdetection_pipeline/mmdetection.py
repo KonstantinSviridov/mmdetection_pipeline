@@ -1424,8 +1424,8 @@ def imdraw_det_bboxes(img,
         right_bottom = (bbox_int[2], bbox_int[3])
         cv2.rectangle(
             img, left_top, right_bottom, bbox_color, thickness=thickness)
-        label_text = class_names[
-            label] if class_names is not None else 'cls {}'.format(label)
+        label_text = str(class_names[
+            label]) if class_names is not None else 'cls {}'.format(label)
         if len(bbox) > 4:
             label_text += '|{:.02f}'.format(bbox[-1])
         cv2.putText(img, label_text, (bbox_int[0], bbox_int[1] - 2),
