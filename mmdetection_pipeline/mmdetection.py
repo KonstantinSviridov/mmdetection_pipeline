@@ -33,8 +33,7 @@ import os.path as osp
 import musket_core.losses
 from musket_core.datasets import SubDataSet, PredictionItem, DataSet, WriteableDataSet, DirectWriteableDS,CompressibleWriteableDS
 import imageio
-
-
+import checkpoint_registry
 
 from mmdet import __version__
 # from mmdet.datasets import get_dataset
@@ -47,6 +46,7 @@ from mmdet.datasets.coco import CocoDataset
 from mmcv.runner import load_checkpoint
 import torch
 import torch.distributed
+from torch.utils import model_zoo
 
 # from segmentation_pipeline.impl.deeplab import model as dlm
 import musket_core.generic_config as generic
@@ -370,8 +370,12 @@ class PipelineConfig(generic.GenericImageTaskConfig):
             self.initNativeConfig()
 
     def getWeightsPath(self):
+        wp = self.weightsPath
+        if os.path.isabs(wp) or wp.startswith("open-mmlab://") or isURL(wp):
+            return wp
+
         wd = os.path.dirname(self.path)
-        joined = os.path.join(wd, self.weightsPath)
+        joined = os.path.join(wd, wp)
         result = os.path.normpath(joined)
         return result
 
@@ -1234,23 +1238,32 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
         runner.resume(cfg.resume_from)
     elif cfg.load_from:
         weightsPath = cfg.load_from
-        if cfg.resetHeads:
-            noHeadWeightsPath = os.path.join(cfg.work_dir,"weights/pretrained_nohead.weights")
-            weights = torch.load(weightsPath)
-            weights['state_dict'] = {
-                k: v
-                for k, v in weights['state_dict'].items()
-                if not k.startswith('bbox_head') and not k.startswith('mask_head')
-            }
-            weightsDir = os.path.dirname(noHeadWeightsPath)
-            if not os.path.exists(weightsDir):
-                os.mkdir(weightsDir)
-            torch.save(weights, noHeadWeightsPath)
-            weightsPath = noHeadWeightsPath
+        if weightsPath is not None:
+            if weightsPath.startswith("open-mmlab://"):
+                cfgName = weightsPath[len("open-mmlab://"):]
+                weightsPath = checkpoint_registry.getPath(cfgName)
+            if cfg.resetHeads:
+                torchHome = torch.hub._get_torch_home()
+                chpName = os.path.basename(weightsPath)[0:(-1)*len(".pth")]
+                noHeadWeightsPath = os.path.join(torchHome,f"checkpoints/nohead/{chpName}_nohead.pth")
+                if not os.path.exists(noHeadWeightsPath):
+                    if isURL(weightsPath):
+                        weights = model_zoo.load_url(weightsPath)
+                    else:
+                        weights = torch.load(weightsPath)
+                    weights['state_dict'] = {
+                        k: v
+                        for k, v in weights['state_dict'].items()
+                        if not k.startswith('bbox_head') and not k.startswith('mask_head')
+                    }
+                    weightsDir = os.path.dirname(noHeadWeightsPath)
+                    if not os.path.exists(weightsDir):
+                        os.mkdir(weightsDir)
+                    torch.save(weights, noHeadWeightsPath)
+                weightsPath = noHeadWeightsPath
 
-        runner.load_checkpoint(weightsPath)
+            runner.load_checkpoint(weightsPath)
     return runner
-
 
 class DrawSamplesHook(Hook):
 
@@ -1615,3 +1628,9 @@ class CustomCheckpointHook(Hook):
         if loss < self.best:
             self.best = loss
             self.delegate.after_train_epoch(runner)
+
+def isURL(s:str)->bool:
+    if s is None:
+        return False
+    l = s.lower()
+    return l.startswith("http://") or l.startswith("https://")
