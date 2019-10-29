@@ -1,16 +1,37 @@
 import os
 import xml.etree.ElementTree as ET
 import requests
-import mmdet
 import threading
 from mmcv import Config
 import torch
 __lock__ = threading.Lock()
 
-mmdetDir = os.path.dirname(mmdet.__file__)
-mmdetConfigsDir = os.path.dirname(mmdetDir) + "/configs"
+mmdetConfigsDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
 amazonBucketPath = "https://s3.ap-northeast-2.amazonaws.com/open-mmlab"
+
+class ConfigDescription:
+
+    def __init__(self, cfg,fullPath:str,relPath:str):
+        self.fullPath = fullPath
+        self.relPath = relPath
+        model = cfg['model']
+        self.type = model['type']
+        self.params = {}
+        n= os.path.basename(fullPath)
+        self.name = n[0:n.rindex(".")]
+        for x in model:
+            v = model[x]
+            if isinstance(v,dict) and 'type' in v:
+                self.params[x] = v['type']
+
+    def toString(self, delim=';')->str:
+        result = f"{self.fullPath}{delim}{self.relPath}{delim}{self.type}"
+        for x in self.params:
+            result += f"{delim}{x}:{self.params[x]}"
+
+        return result
+
 
 def listModelWeightPaths(prefix:str = "mmdetection/models/", postfix:str = ".pth", bucketURL=amazonBucketPath)->[str]:
 
@@ -47,21 +68,26 @@ def getXML(url):
     return tree
 
 
-def listConfigNames(p, result = []):
+def listConfigs(p=mmdetConfigsDir, root = None, result = [])->[ConfigDescription]:
+    if root is None:
+        root = p
     if os.path.isdir(p):
         for x in os.listdir(p):
             xp = os.path.join(p,x)
-            listConfigNames(xp, result)
+            listConfigs(xp, root, result)
     elif p.endswith(".py"):
         try:
+            fileName = os.path.basename(p)
             cfg = Config.fromfile(p)
-            result.append(os.path.basename(p))
+            relPath = os.path.relpath(p,root).replace("\\","/")
+            cd = ConfigDescription(cfg,p.replace("\\","/"),relPath)
+            result.append(cd)
         except:
             pass
     return result
 
 def buildCorrespondence(configsDir=mmdetConfigsDir, bucketPath=amazonBucketPath, prefix:str = "mmdetection/models/", postfix:str = ".pth"):
-    configNames = set([x[0:x.rindex(".py")] for x in listConfigNames(configsDir)])
+    configNames = set([x.name for x in listConfigs(configsDir)])
     weightPaths = listModelWeightPaths(prefix,postfix,bucketPath)
     result = {}
     for pth in weightPaths:
