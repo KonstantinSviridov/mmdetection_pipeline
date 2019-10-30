@@ -321,11 +321,19 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.setNumClasses(modelCfg, 'mask_head')
         self.setNumClasses(modelCfg, 'mask_iou_head')
 
+        if 'semantic_head' in modelCfg:
+            del modelCfg['semantic_head']
+
+        if 'semantic_roi_extractor' in modelCfg:
+            del modelCfg['semantic_roi_extractor']
+
         self.setImageScale(cfg.data, 'train', True)
         self.setImageScale(cfg.data, 'test')
         self.setImageScale(cfg.data, 'val')
 
-
+        self.disableSemanticHead(cfg.data, 'train')
+        self.disableSemanticHead(cfg.data, 'test')
+        self.disableSemanticHead(cfg.data, 'val')
 
         # # set cudnn_benchmark
         # if cfg.get('cudnn_benchmark', False):
@@ -362,6 +370,14 @@ class PipelineConfig(generic.GenericImageTaskConfig):
             value = shapesList[0]
 
         m['img_scale'] = value
+
+    def disableSemanticHead(self, dataCfg, moduleTitle, multi=False):
+        if not moduleTitle in dataCfg:
+            return
+
+        m = dataCfg[moduleTitle]
+        if 'with_semantic_seg' in m:
+            m['with_semantic_seg'] = False
 
     def __setattr__(self, key, value):
         hasAttr = hasattr(self,key)
@@ -999,14 +1015,14 @@ class MyDataSet(CustomDataset):
                 img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
             img = img.copy()
             if self.with_seg:
-                gt_seg = mmcv.imread(
-                    osp.join(self.seg_prefix, img_info['file_name'].replace(
-                        'jpg', 'png')),
-                    flag='unchanged')
-                gt_seg = self.seg_transform(gt_seg.squeeze(), img_scale, flip)
-                gt_seg = mmcv.imrescale(
-                    gt_seg, self.seg_scale_factor, interpolation='nearest')
-                gt_seg = gt_seg[None, ...]
+                # gt_seg = mmcv.imread(
+                #     osp.join(self.seg_prefix, img_info['file_name'].replace(
+                #         'jpg', 'png')),
+                #     flag='unchanged')
+                # gt_seg = self.seg_transform(gt_seg.squeeze(), img_scale, flip)
+                # gt_seg = mmcv.imrescale(
+                #     gt_seg, self.seg_scale_factor, interpolation='nearest')
+                # gt_seg = gt_seg[None, ...]
                 pass
             if self.proposals is not None:
                 proposals = self.bbox_transform(proposals, img_shape, scale_factor,
@@ -1249,6 +1265,7 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
                 if not os.path.exists(noHeadWeightsPath):
                     if isURL(weightsPath):
                         weights = model_zoo.load_url(weightsPath)
+
                     else:
                         weights = torch.load(weightsPath)
                     weights['state_dict'] = {
