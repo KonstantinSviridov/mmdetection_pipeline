@@ -164,48 +164,20 @@ class MMDetWrapper:
 
         self.model.cfg = self.cfg
         self.model.to(torch.cuda.current_device())
-        checkpoint = load_checkpoint(self.model, self.weightsPath)
 
         input = args[0]
 
-        #input = np.reshape(input, (len(input), -1))
-
-        #self.model._n_features = input.shape[1]
-
         self.model.eval()
         predictions = inference_detector(self.model, input)
-        # predictions = self.model.predict(input)
-        #
-        # if self.output_dim in [1, 2]:
-        #     return self.groups_to_vectors(predictions, len(predictions))
-        if isinstance(predictions,types.GeneratorType):
-            predictions = [ x for x in predictions ]
 
-        if self.model.with_mask:
-            decoded = []
-            for p in predictions:
-                bboxes = p[0]
-                mmdetMasks = p[1]
-                decodedMasks = []
-                for clazzMasks in mmdetMasks:
-                    decodedClazzmasks = []
-                    if len(clazzMasks) != 0:
-                        for m in clazzMasks:
-                            decodedMask = mask_util.decode(m)
-                            decodedClazzmasks.append(decodedMask)
-                    decodedMasks.append(np.array(decodedClazzmasks))
-                decoded.append({
-                    'bboxes': bboxes,
-                    'masks': decodedMasks
-                })
-            predictions = decoded
-
-        return predictions
+        wm = self.model.with_mask
+        result = [convertMMDETModelOutput(x, wm) for x in predictions]
+        return result
 
     def load_weights(self, path, val = None):
-        # if os.path.exists(path):
-        #     self.model._Booster = lightgbm.Booster(model_file=path)
+
         self.cfg.resume_from = path
+        checkpoint = load_checkpoint(self.model, path)
 
     def numbers_to_vectors(self, numbers):
         result = np.zeros((len(numbers), self.output_dim))
@@ -283,6 +255,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.nativeConfig = None
         self.imagesPerGpu = None
         self.resetHeads = True
+        self.threshold = 0.5
         super().__init__(**atrs)
         self.dataset_clazz = datasets.ImageKFoldedDataSet
         self.flipPred=False
@@ -334,6 +307,8 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.disableSemanticHead(cfg.data, 'train')
         self.disableSemanticHead(cfg.data, 'test')
         self.disableSemanticHead(cfg.data, 'val')
+
+        cfg.workflow = [ ('train',1),('val',1) ]
 
         # # set cudnn_benchmark
         # if cfg.get('cudnn_benchmark', False):
@@ -461,12 +436,12 @@ class PipelineConfig(generic.GenericImageTaskConfig):
 
     def load_writeable_dataset(self, ds, path)->DataSet:
         resName = (ds.name if hasattr(ds, "name") else "") + "_predictions"
-        result = CompressibleWriteableDS(ds, resName, path, len(ds))
+        result = MMdetWritableDS(ds, resName, path, self.withMask(), self.threshold)
         return result
 
     def create_writeable_dataset(self, dataset:DataSet, dsPath:str)->WriteableDataSet:
         resName = (dataset.name if hasattr(dataset, "name") else "") + "_predictions"
-        result = MMdetWritableDS(dataset, resName, dsPath, self.withMask())
+        result = MMdetWritableDS(dataset, resName, dsPath, self.withMask(), self.threshold)
         return result
 
     def predict_to_directory(self, spath, tpath,fold=0, stage=0, limit=-1, batchSize=32,binaryArray=False,ttflips=False):
@@ -563,15 +538,19 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         return False
 
     def update(self,z,res):
-        if self.withMask():
-            bboxes = []
-            masks = []
-            for x in res:
-                bboxes.append(x['bboxes'])
-                masks.append(x['masks'])
-        else:
-            bboxes = res
-            masks = None
+
+        wm = self.withMask()
+        labels = []
+        bboxes = []
+        masks = [] if wm else None
+        for x in res:
+            thresholded = applyTresholdToPrediction(x, wm, self.threshold)
+            labels.append(thresholded[0].tolist())
+            bboxes.append(thresholded[1].tolist())
+            if wm:
+                masks.append(thresholded[2].tolist())
+
+        z.labels = labels
         z.bounding_boxes_unaug = bboxes
         z.segmentation_maps_unaug = masks
 
@@ -582,58 +561,115 @@ class PipelineConfig(generic.GenericImageTaskConfig):
 #     cfg.path = path
 #     return cfg
 
+
+def convertMMDETModelOutput(pred, withMasks):
+    labels = []
+    probabilities = []
+    resultBBoxes = []
+    resultMasks = []
+    picBBboxes = pred[0] if withMasks else pred
+    if withMasks:
+        picMasks = pred[1]
+    for label in range(len(picBBboxes)):
+        bboxes = picBBboxes[label]
+        if len(bboxes) == 0:
+            continue
+
+        l = len(bboxes)
+        if withMasks:
+            masks = picMasks[label]
+            if len(masks) != l:
+                print("Mask and bounding boxes arrays have different lengths")
+                l = min(l, len(masks))
+
+        for i in range(l):
+            predBB = bboxes[i]
+            bb = predBB[:4]
+            prob = predBB[4]
+            labels.append(label)
+            probabilities.append(prob)
+            resultBBoxes.append(bb)
+            if withMasks:
+                decodedMask = mask_util.decode(masks[i])
+                resultMasks.append(decodedMask)
+    labels = np.array(labels, dtype=np.int16)
+    probabilities = np.array(probabilities)
+    resultBBoxes = np.array(resultBBoxes)
+    if withMasks:
+        resultMasks = np.array(resultMasks)
+        converted = (labels, probabilities, resultBBoxes, resultMasks)
+    else:
+        converted = (labels, probabilities, resultBBoxes)
+    return converted
+
+def applyTresholdToPrediction(pred, withMasks, threshold):
+    probabilites = pred[1]
+    inds = np.nonzero(probabilites >= threshold)
+    labels = pred[0][inds]
+    bboxes = pred[2][inds]
+    if withMasks:
+        masks = pred[3][inds]
+        tresholdedPrediction = (labels, bboxes, masks)
+    else:
+        tresholdedPrediction = (labels, bboxes)
+    return tresholdedPrediction
+
 class MMdetWritableDS(CompressibleWriteableDS):
 
-    def __init__(self,orig,name,dsPath, withMasks, count = 0,asUints=True,scale=255):
+    def __init__(self,orig,name,dsPath, withMasks, threshold=0.5, count = 0,asUints=True,scale=255):
         super().__init__(orig,name,dsPath, count,False,scale)
         self.withMasks = withMasks
+        self.threshold = threshold
 
+    def __getitem__(self, item):
+        res = super().__getitem__(item)
+        if isinstance(item, slice):
+            for pi in res:
+                self.processPredictionItem(pi)
+        else:
+            self.processPredictionItem(res)
+        return res
+
+    def processPredictionItem(self, pi):
+        pred = pi.prediction
+        tresholdedPrediction = applyTresholdToPrediction(pred,self.withMasks,self.threshold)
+        pi.prediction = tresholdedPrediction
 
     def saveItem(self, path:str, item):
+        wm = self.withMasks
+
         dire = os.path.dirname(path)
-        if self.withMasks:
-            bboxes = item['bboxes']
-            masks = item['masks']
+        if not os.path.exists(dire):
+            os.mkdir(dire)
+
+        labels = item[0]
+        probabilities = item[1]
+        bboxes = item[2]
+        if wm:
+            masks = item[3]
             if self.asUints:
                 if self.scale <= 255:
                     masks = (masks * self.scale).astype(np.uint8)
                 else:
                     masks = (masks * self.scale).astype(np.uint16)
-            if not os.path.exists(dire):
-                os.mkdir(dire)
 
-            payload = np.array([bboxes,masks],dtype=np.object)
-            np.savez_compressed(path, payload)
+            np.savez_compressed(file=path, labels=labels, probabilities=probabilities, bboxes=bboxes, masks=masks)
         else:
-            if self.asUints:
-                if self.scale<=255:
-                    item=(item*self.scale).astype(np.uint8)
-                else:
-                    item=(item*self.scale).astype(np.uint16)
-            if not os.path.exists(dire):
-                os.mkdir(dire)
-            np.savez_compressed(path, item)
+            np.savez_compressed(file=path, labels=labels, probabilities=probabilities, bboxes=bboxes)
 
     def loadItem(self, path:str):
         npzFile = np.load(path,allow_pickle=True)
+        labels = npzFile['labels']
+        probabilities = npzFile['probabilities']
+        bboxes = npzFile['bboxes']
         if self.withMasks:
-            payload = npzFile["arr_0.npy"]
-            bboxes = payload[0]
-            masks = payload[1]
+            masks = npzFile['masks']
             if self.asUints:
                 masks=masks.astype(np.float32)/self.scale
 
-            result = {
-                'bboxes': bboxes,
-                'masks': masks
-            }
-            return result
-
+            return (labels, probabilities, bboxes, masks)
         else:
-            if self.asUints:
-                x= npzFile["arr_0.npy"].astype(np.float32) / self.scale
-            else:
-                x= npzFile["arr_0.npy"]
+            return (labels, probabilities, bboxes)
         return x;
 
 class DetectionStage(generic.Stage):
@@ -700,6 +736,8 @@ class DetectionStage(generic.Stage):
         train_dataset.CLASSES = CLASSES
         val_dataset = MyDataSet(ds=valDS, **cfg.data.val)
         val_dataset.CLASSES = CLASSES
+        val_dataset1 = MyDataSet(ds=valDS, **cfg.data.val)
+        val_dataset1.CLASSES = CLASSES
         val_dataset.test_mode = True
         cfg.data.val = val_dataset
         if cfg.checkpoint_config is not None:
@@ -709,8 +747,8 @@ class DetectionStage(generic.Stage):
                 mmdet_version=__version__,
                 config=cfg.text,
                 CLASSES=train_dataset.CLASSES)
-            cfg.checkpoint_config.out_dir = self.cfg.getWeightsOutPath()
-            cfg.checkpoint_config.filename_tmpl = f"best-{ec.fold}.{ec.stage}.weights"
+            cfg.checkpoint_config.out_dir = os.path.dirname(ec.weightsPath())
+            cfg.checkpoint_config.filename_tmpl = os.path.basename(ec.weightsPath())
         logger = get_root_logger(cfg.log_level)
         model.setClasses(train_dataset.CLASSES)
 
@@ -721,6 +759,13 @@ class DetectionStage(generic.Stage):
                 train_dataset,
                 cfg.data.imgs_per_gpu,
                 cfg.data.workers_per_gpu,
+                num_gpus=cfg.gpus,
+                dist=distributed),
+
+            build_dataloader(
+                val_dataset1,
+                1,
+                1,
                 num_gpus=cfg.gpus,
                 dist=distributed)
         ]
@@ -753,7 +798,7 @@ class DetectionStage(generic.Stage):
                 cpHook1.setBest(prevInfo.best)
 
 
-        dsh = DrawSamplesHook(val_dataset, list(range(min(len(test_indexes),10))), os.path.join(os.path.dirname(self.cfg.path),"examples"))
+        dsh = DrawSamplesHook(val_dataset, list(range(min(len(test_indexes),10))), os.path.join(os.path.dirname(self.cfg.path),"examples"),self.cfg.threshold)
         runner.register_hook(HookWrapper(dsh, toSingleGPUModeBefore, toSingleGPUModeAfter))
         for callback in callbacks:
             if "CSVLogger" in str(callback):
@@ -1265,7 +1310,6 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
                 if not os.path.exists(noHeadWeightsPath):
                     if isURL(weightsPath):
                         weights = model_zoo.load_url(weightsPath)
-
                     else:
                         weights = torch.load(weightsPath)
                     weights['state_dict'] = {
@@ -1284,12 +1328,12 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
 
 class DrawSamplesHook(Hook):
 
-    def __init__(self, dataset, indices, dstFolder):
+    def __init__(self, dataset, indices, dstFolder, threshold=0.5):
         self.dataset = dataset
         self.indices = indices
         self.dstFolder = dstFolder
-        self.score_thr = 0.3
         self.exampleWidth = 800
+        self.threshold = threshold
 
     def after_train_epoch(self, runner:Runner):
 
@@ -1306,8 +1350,12 @@ class DrawSamplesHook(Hook):
 
             # compute output
             with torch.no_grad():
-                result = runner.model(
+                pred = runner.model(
                     return_loss=False, rescale=True, **data_gpu)
+
+            withMasks = isinstance(pred,tuple)
+            result = convertMMDETModelOutput(pred,withMasks)
+            result = applyTresholdToPrediction(result,withMasks,self.threshold)
             results[idx] = (result, pi)
 
             #batch_size = runner.world_size
@@ -1330,17 +1378,15 @@ class DrawSamplesHook(Hook):
 
             gtLabels = r[1].y[0]-1
             gtBboxesRaw = r[1].y[1]
-            gtBboxes = np.zeros((gtBboxesRaw.shape[0],5),dtype=np.float)
-            gtBboxes[:,:4] = gtBboxesRaw * scale
-            gtBboxes[:,4] = 1
-            result = r[0]
+            gtBboxes = gtBboxesRaw * scale
 
-            if isinstance(result, tuple):
-                bbox_result, segm_result = result
-            else:
-                bbox_result, segm_result = result, None
-            bboxes = np.vstack(bbox_result)
-            bboxes[:,:4] *= scale
+            result = r[0]
+            labels = result[0]
+            bboxes = result[1]
+            if len(result) == 3:
+                segm_result = result[2]
+
+            bboxes *= scale
             numColors = len(imgaug.SegmentationMapsOnImage.DEFAULT_SEGMENT_COLORS)
             if segm_result is not None:
                 masksShape = list(imgOrig.shape[:2]) + [1]
@@ -1357,13 +1403,9 @@ class DrawSamplesHook(Hook):
 
                 predMasksArr = np.zeros(masksShape, dtype=np.int)
                 objColor = 1
-                for i in range(len(self.dataset.CLASSES)):
-                    pm = segm_result[i]
-                    if len(pm) > 0:
-                        predMasksDecoded = [mask_util.decode(x) for x in pm]
-                        for x in predMasksDecoded:
-                            predMasksArr[x > 0] = objColor
-                            objColor = 1 + (objColor + 1) % (numColors-1)
+                for x in segm_result:
+                    predMasksArr[x > 0] = objColor
+                    objColor = 1 + (objColor + 1) % (numColors - 1)
 
                 #CustomSegmentationMapOnImage(np.transpose(gtMasks, axes=(1,2,0)), imgOrig.shape).draw_on_image(imgOrig)
                 gtMaskImg = imgaug.SegmentationMapOnImage(gtMasksArr, imgOrig.shape).draw_on_image(imgOrig)[0]
@@ -1372,14 +1414,8 @@ class DrawSamplesHook(Hook):
                 gtMaskedImages.append(imgaug.imresize_single_image(gtMaskImg, (newX, newY), 'cubic'))
                 predMaskedImages.append(imgaug.imresize_single_image(predMaskImg,(newX, newY), 'cubic'))
 
-
-            labels = [
-                np.full(bbox.shape[0], i, dtype=np.int32)
-                for i, bbox in enumerate(bbox_result)
-            ]
-            labels = np.concatenate(labels)
-            predImg = imdraw_det_bboxes(img.copy(),bboxes,labels,class_names=classNames,score_thr=self.score_thr)
-            gtImg = imdraw_det_bboxes(img.copy(), gtBboxes, gtLabels, class_names=classNames, score_thr=self.score_thr)
+            predImg = imdraw_det_bboxes(img.copy(),bboxes,labels,class_names=classNames)
+            gtImg = imdraw_det_bboxes(img.copy(), gtBboxes, gtLabels, class_names=classNames)
             gtImages.append(gtImg)
             predImages.append(predImg)
 
@@ -1439,7 +1475,7 @@ def imdraw_det_bboxes(img,
     img = imread(img)
 
     if score_thr > 0:
-        assert bboxes.shape[1] == 5
+        assert bboxes.shape[1] == 4
         scores = bboxes[:, -1]
         inds = scores > score_thr
         bboxes = bboxes[inds, :]
@@ -1597,28 +1633,40 @@ class KerasCBWrapper(Hook):
         self.cb.on_epoch_begin(runner.epoch, None)
 
     def after_train_epoch(self, runner):
-        logs = log(runner)
-        self.cb.on_epoch_end(runner.epoch, logs)
+        self.train_logs = log(runner)
+        #self.cb.on_epoch_end(runner.epoch, logs)
 
     def after_val_epoch(self, runner):
-        self.cb.on_epoch_end(runner.epoch, None)
+        self.val_logs = log(runner)
+        if 'lr' in self.val_logs:
+            del self.val_logs['lr']
+        logs = {}
+        for x in self.train_logs:
+            x1 = x
+            if x == 'mAP':
+                x1 = 'val_mAP'
+            logs[x1] = self.train_logs[x]
+        for x in self.val_logs:
+            logs[f"val_{x}"] = self.val_logs[x]
+        self.cb.on_epoch_end(runner.epoch, logs)
 
     def end_of_epoch(self, runner):
         self.cb.on_epoch_end(runner.epoch, None)
 
 
 def log(runner):
+    runner.log_buffer.average()
     log_dict = OrderedDict()
     # training mode if the output contains the key "time"
-    log_dict['epoch'] = runner.epoch
-    mode = 'train' if 'time' in runner.log_buffer.output else 'val'
-    log_dict['mode'] = mode
-    log_dict['iter'] = runner.inner_iter + 1
+    #log_dict['epoch'] = runner.epoch
+    #mode = 'train' if 'time' in runner.log_buffer.output else 'val'
+    #log_dict['mode'] = mode
+    #log_dict['iter'] = runner.inner_iter + 1
     # only record lr of the first param group
     log_dict['lr'] = runner.current_lr()[0]
-    if mode == 'train':
-        log_dict['time'] = runner.log_buffer.output['time']
-        log_dict['data_time'] = runner.log_buffer.output['data_time']
+    # if mode == 'train':
+    #     log_dict['time'] = runner.log_buffer.output['time']
+    #     log_dict['data_time'] = runner.log_buffer.output['data_time']
     for name, val in runner.log_buffer.output.items():
         if name in ['time', 'data_time']:
             continue
@@ -1640,7 +1688,7 @@ class CustomCheckpointHook(Hook):
     def setBest(self, value):
         self.best = value
 
-    def after_train_epoch(self, runner):
+    def after_val_epoch(self, runner):
         loss = get_loss(runner)
         if loss < self.best:
             self.best = loss
