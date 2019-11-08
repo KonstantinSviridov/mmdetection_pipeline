@@ -53,6 +53,7 @@ import musket_core.generic_config as generic
 from musket_core.builtin_trainables import OutputMeta
 from mmdet.datasets import get_dataset
 from typing import Callable
+from metrics import mmdet_mAP_bbox, mAP_masks
 
 class MMDetWrapper:
     def __init__(self, cfg:Config, weightsPath:str, classes: [str]):
@@ -259,6 +260,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         super().__init__(**atrs)
         self.dataset_clazz = datasets.ImageKFoldedDataSet
         self.flipPred=False
+        self.final_metrics.extend([mAP_masks.__name__, mmdet_mAP_bbox.__name__])
 
     def initNativeConfig(self):
 
@@ -594,7 +596,7 @@ def convertMMDETModelOutput(pred, withMasks):
                 resultMasks.append(decodedMask)
     labels = np.array(labels, dtype=np.int16)
     probabilities = np.array(probabilities)
-    resultBBoxes = np.array(resultBBoxes)
+    resultBBoxes = np.array(resultBBoxes).reshape((-1,4))
     if withMasks:
         resultMasks = np.array(resultMasks)
         converted = (labels, probabilities, resultBBoxes, resultMasks)
@@ -731,12 +733,12 @@ class DetectionStage(generic.Stage):
 
 
         cfg = model.cfg
-        train_dataset = MyDataSet(ds=trainDS, **cfg.data.train)
+        train_dataset = MyDataSet(ds=trainDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.train)
         CLASSES = model.classes
         train_dataset.CLASSES = CLASSES
-        val_dataset = MyDataSet(ds=valDS, **cfg.data.val)
+        val_dataset = MyDataSet(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
         val_dataset.CLASSES = CLASSES
-        val_dataset1 = MyDataSet(ds=valDS, **cfg.data.val)
+        val_dataset1 = MyDataSet(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
         val_dataset1.CLASSES = CLASSES
         val_dataset.test_mode = True
         cfg.data.val = val_dataset
@@ -984,8 +986,10 @@ class MusketAnnotationInfo(MusketInfo):
 
 class MyDataSet(CustomDataset):
     
-    def __init__(self, ds:DataSet, **kwargs):
+    def __init__(self, ds:DataSet, aug=None,transforms=None, **kwargs):
         self.ds = ds
+        self.aug = aug
+        self.transforms = transforms
         args = kwargs.copy()
         if 'type' in args:
             args.pop('type')
@@ -997,6 +1001,14 @@ class MyDataSet(CustomDataset):
 
     def __len__(self):
         return len(self.ds)
+
+    def augmentor(self, isTrain)->imgaug.augmenters.Augmenter:
+        allAug = []
+        if isTrain:
+            allAug = allAug + self.aug
+        allAug = allAug + self.transforms
+        aug = imgaug.augmenters.Sequential(allAug)
+        return aug
 
     def _set_group_flag(self):
         self.flag = np.zeros(len(self), dtype=np.uint8)
@@ -1014,6 +1026,7 @@ class MyDataSet(CustomDataset):
         return list(range(len(self)))
 
     def prepare_train_img(self, idx):
+
         try:
             img_info = self.img_infos[idx]
             # load image
@@ -1039,8 +1052,14 @@ class MyDataSet(CustomDataset):
             ann = self.get_ann_info(idx)
             gt_bboxes = ann['bboxes']
             gt_labels = ann['labels']
+            gt_masks = None
+            gt_bboxes_ignore = None
+            if self.with_mask:
+                gt_masks = ann['masks']
             if self.with_crowd:
                 gt_bboxes_ignore = ann['bboxes_ignore']
+
+            img, gt_bboxes, gt_masks, gt_bboxes_ignore = self.applyAugmentations(img, gt_bboxes, gt_masks, gt_bboxes_ignore, True)
 
             # skip the image if there is no valid gt bbox
             if len(gt_bboxes) == 0:
@@ -1055,6 +1074,7 @@ class MyDataSet(CustomDataset):
             # apply transforms
             flip = True if np.random.rand() < self.flip_ratio else False
             # randomly sample a scale
+
             img_scale = random_scale(self.img_scales, self.multiscale_mode)
             img, img_shape, pad_shape, scale_factor = self.img_transform(
                 img, img_scale, flip, keep_ratio=self.resize_keep_ratio)
@@ -1080,7 +1100,7 @@ class MyDataSet(CustomDataset):
                 gt_bboxes_ignore = self.bbox_transform(gt_bboxes_ignore, img_shape,
                                                        scale_factor, flip)
             if self.with_mask:
-                gt_masks = self.mask_transform(ann['masks'], pad_shape,
+                gt_masks = self.mask_transform(gt_masks, pad_shape,
                                                scale_factor, flip)
 
             ori_shape = (img_info['height'], img_info['width'], 3)
@@ -1110,6 +1130,32 @@ class MyDataSet(CustomDataset):
             return data
         finally:
             img_info.dispose()
+
+    def applyAugmentations(self, img, gt_bboxes, gt_masks, gt_bboxes_ignore, isTrain):
+
+        aug = self.augmentor(isTrain)
+
+        img = aug.augment_image(img)
+        gt_bboxes = self.augmentBoundingBoxes(aug, gt_bboxes, img)
+
+        if gt_masks is not None:
+            gt_masks = aug.augment_images(gt_masks)
+
+        if gt_bboxes_ignore is not None:
+            gt_bboxes_ignore = self.augmentBoundingBoxes(aug, gt_bboxes_ignore, img)
+
+        return img, gt_bboxes, gt_masks, gt_bboxes_ignore
+
+    def augmentBoundingBoxes(self, aug, gt_bboxes, img):
+        imgaugBBoxes = [imgaug.BoundingBox(x[0], x[1], x[2], x[3]) for x in gt_bboxes]
+        imgaugBBoxesOnImage = imgaug.BoundingBoxesOnImage(imgaugBBoxes, img.shape)
+        imgaugBBoxesOnImageAug = aug.augment_bounding_boxes(imgaugBBoxesOnImage)
+        dtype = gt_bboxes.dtype
+        shape = gt_bboxes.shape
+        gt_bboxes = [np.array([bbox.x1, bbox.y1, bbox.x2, bbox.y2], dtype=dtype) for bbox in
+                     imgaugBBoxesOnImageAug.bounding_boxes]
+        gt_bboxes = np.array(gt_bboxes, dtype=dtype).reshape(shape)
+        return gt_bboxes
 
     def prepare_test_img(self, idx):
         """Prepare an image for testing (multi-scale and flipping)"""
