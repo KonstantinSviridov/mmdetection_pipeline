@@ -33,7 +33,7 @@ import os.path as osp
 import musket_core.losses
 from musket_core.datasets import SubDataSet, PredictionItem, DataSet, WriteableDataSet, DirectWriteableDS,CompressibleWriteableDS
 import imageio
-import checkpoint_registry
+from mmdetection_pipeline import checkpoint_registry
 
 from mmdet import __version__
 # from mmdet.datasets import get_dataset
@@ -53,7 +53,7 @@ import musket_core.generic_config as generic
 from musket_core.builtin_trainables import OutputMeta
 from mmdet.datasets import get_dataset
 from typing import Callable
-from metrics import mmdet_mAP_bbox, mAP_masks
+from mmdetection_pipeline.metrics import mmdet_mAP_bbox, mAP_masks
 
 class MMDetWrapper:
     def __init__(self, cfg:Config, weightsPath:str, classes: [str]):
@@ -741,7 +741,6 @@ class DetectionStage(generic.Stage):
         val_dataset1 = MyDataSet(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
         val_dataset1.CLASSES = CLASSES
         val_dataset.test_mode = True
-        cfg.data.val = val_dataset
         if cfg.checkpoint_config is not None:
             # save mmdet version, config file content and class names in
             # checkpoints as meta data
@@ -775,6 +774,7 @@ class DetectionStage(generic.Stage):
         runner = train_detector(
             model.model,
             train_dataset,
+            val_dataset,
             cfg,
             distributed=distributed,  # distributed,
             validate=True,  # args_validate,
@@ -1233,7 +1233,8 @@ def getBB(mask):
 
 
 def train_detector(model,
-                   dataset,
+                   trainDataset,
+                   valDataset,
                    cfg,
                    distributed=False,
                    validate=False,
@@ -1243,11 +1244,11 @@ def train_detector(model,
 
     # start training
     if distributed:
-        return _dist_train_runner(model, dataset, cfg, validate=validate)
+        return _dist_train_runner(model, trainDataset, valDataset, cfg, validate=validate)
     else:
-        return _non_dist_train_runner(model, dataset, cfg, validate=validate)
+        return _non_dist_train_runner(model, trainDataset, valDataset, cfg, validate=validate)
 
-def _dist_train_runner(model, dataset, cfg, validate=False)->Runner:
+def _dist_train_runner(model, trainDataset, valDataset, cfg, validate=False)->Runner:
 
     # put model on gpus
     model = MMDistributedDataParallel(model.cuda())
@@ -1271,7 +1272,7 @@ def _dist_train_runner(model, dataset, cfg, validate=False)->Runner:
     runner.register_hook(DistSamplerSeedHook())
     # register eval hooks
     if validate:
-        val_dataset_cfg = cfg.data.val
+        val_dataset_cfg = valDataset
         eval_cfg = cfg.get('evaluation', {})
         if isinstance(model.module, RPN):
             # TODO: implement recall hooks for other datasets
@@ -1301,7 +1302,7 @@ def toSingleGPUModeBefore(runner):
 def toSingleGPUModeAfter(runner, beforeRes):
     runner.model.device_ids = beforeRes['device_ids']
 
-def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
+def _non_dist_train_runner(model, trainDataset, valDataset, cfg, validate=False)->Runner:
 
     # put model on gpus
     model = MMDataParallel(model, device_ids=range(cfg.gpus)).cuda()
@@ -1326,7 +1327,7 @@ def _non_dist_train_runner(model, dataset, cfg, validate=False)->Runner:
 
     # register eval hooks
     if validate:
-        val_dataset_cfg = cfg.data.val
+        val_dataset_cfg = valDataset
         eval_cfg = cfg.get('evaluation', {})
         if isinstance(model.module, RPN):
             # TODO: implement recall hooks for other datasets

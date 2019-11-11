@@ -24,11 +24,19 @@ class ConfigDescription:
             v = model[x]
             if isinstance(v,dict) and 'type' in v:
                 self.params[x] = v['type']
+            elif isinstance(v,list):
+                if all(isinstance(y,dict) and 'type' in y for y in v):
+                    self.params[x] = [y['type'] for y in v]
 
     def toString(self, delim=';')->str:
         result = f"{self.fullPath}{delim}{self.relPath}{delim}{self.type}"
         for x in self.params:
-            result += f"{delim}{x}:{self.params[x]}"
+            paramVal = self.params[x]
+            if isinstance(paramVal, list):
+                paramStr = ", ".join(paramVal)
+            else:
+                paramStr = paramVal
+            result += f"{delim}{x}:{paramStr}"
 
         return result
 
@@ -77,7 +85,6 @@ def listConfigs(p=mmdetConfigsDir, root = None, result = [])->[ConfigDescription
             listConfigs(xp, root, result)
     elif p.endswith(".py"):
         try:
-            fileName = os.path.basename(p)
             cfg = Config.fromfile(p)
             relPath = os.path.relpath(p,root).replace("\\","/")
             cd = ConfigDescription(cfg,p.replace("\\","/"),relPath)
