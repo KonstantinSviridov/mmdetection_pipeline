@@ -2,7 +2,6 @@ from musket_core.metrics import final_metric
 from musket_core.model import FoldsAndStages
 from musket_core.datasets import DataSet
 from mmdet.core.evaluation.mean_ap import eval_map
-from mmdetection_pipeline.conversions import applyTresholdToPrediction, convertMMDETModelOutput
 import numpy as np
 
 @final_metric

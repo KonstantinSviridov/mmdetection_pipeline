@@ -20,6 +20,7 @@ from musket_core.generic_config import ExecutionConfig, ReporterCallback, KFoldC
 import os
 from musket_core.datasets import SubDataSet,DataSet, WriteableDataSet
 from mmdetection_pipeline import checkpoint_registry
+from mmdetection_pipeline.tools import isURL
 
 from mmdet import __version__
 from mmdet.apis.train import build_optimizer, batch_processor
@@ -593,6 +594,7 @@ class DetectionStage(generic.Stage):
             logger=logger)
 
         runner._epoch = initial_epoch
+        runner.executionConfig = ec
 
         cpHooks = list(filter(lambda x: 'CheckpointHook' in str(x), runner.hooks))
         if len(cpHooks) == 0:

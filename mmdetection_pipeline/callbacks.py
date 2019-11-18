@@ -14,7 +14,7 @@ from musket_core.generic_config import ExecutionConfig
 import os
 import torch
 import torch.distributed
-from conversions import convertMMDETModelOutput, applyTresholdToPrediction
+from mmdetection_pipeline.conversions import convertMMDETModelOutput, applyTresholdToPrediction
 
 
 class DrawSamplesHook(Hook):
@@ -28,7 +28,7 @@ class DrawSamplesHook(Hook):
         self.ec=ec
 
     def after_train_epoch(self, runner:Runner):
-
+        ec = runner.executionConfig
         runner.model.eval()
         results = [None for _ in range(len(self.indices))]
         if runner.rank == 0:
@@ -125,7 +125,10 @@ class DrawSamplesHook(Hook):
 
         epoch = runner.epoch
         imgPath = f"{epoch}.jpg"
-        out_file = os.path.join(self.dstFolder,imgPath)
+        imFolder = os.path.join(self.dstFolder,f"{ec.fold}/{ec.stage}")
+        if not os.path.exists(imFolder):
+            os.makedirs(imFolder)
+        out_file = os.path.join(imFolder,imgPath)
         imwrite(exampleImg, out_file)
 
 
