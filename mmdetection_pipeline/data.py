@@ -13,6 +13,9 @@ from mmdet.datasets.utils import to_tensor, random_scale
 from mmdet.core.post_processing.merge_augs import merge_aug_bboxes, merge_aug_masks
 from typing import Callable
 import networkx as nx
+import imageio
+from callbacks import imdraw_det_bboxes
+
 
 class MMdetWritableDS(CompressibleWriteableDS):
 
@@ -194,7 +197,7 @@ class MusketAnnotationInfo(MusketInfo):
         self.masks = None
 
 
-class MyDataSet(CustomDataset):
+class DataSetAdapter(CustomDataset):
 
     def __init__(self, ds: DataSet, aug=None, transforms=None, **kwargs):
         self.ds = ds
@@ -269,8 +272,14 @@ class MyDataSet(CustomDataset):
             if self.with_crowd:
                 gt_bboxes_ignore = ann['bboxes_ignore']
 
+            # dumpData(f"d:/ttt/{img_info.id}_tmp_bbox.jpg", f"d:/ttt/{img_info.id}_tmp_mask.jpg", img, gt_labels-1,
+            #          gt_bboxes, gt_masks, self.CLASSES)
+
             img, gt_bboxes, gt_masks, gt_bboxes_ignore = self.applyAugmentations(img, gt_bboxes, gt_masks,
                                                                                  gt_bboxes_ignore, True)
+
+            # dumpData(f"d:/ttt/{img_info.id}_tmp_bbox_aug.jpg", f"d:/ttt/{img_info.id}_tmp_mask_aug.jpg", img, gt_labels-1,
+            #          gt_bboxes, gt_masks, self.CLASSES)
 
             # skip the image if there is no valid gt bbox
             if len(gt_bboxes) == 0:
@@ -323,6 +332,14 @@ class MyDataSet(CustomDataset):
                 scale_factor=scale_factor,
                 flip=flip)
 
+            # imgt = img.transpose(1, 2, 0)
+            # imgt -= np.min(imgt)
+            # imgt *= (255 / np.max(imgt))
+            # imgt = imgt.astype(np.uint8)
+            # dumpData(f"d:/ttt/{img_info.id}_tmp_bbox_aug1.jpg", f"d:/ttt/{img_info.id}_tmp_mask_aug1.jpg", imgt,
+            #          gt_labels - 1,
+            #          gt_bboxes, gt_masks, self.CLASSES)
+
             data = dict(
                 img=DC(to_tensor(img), stack=True),
                 img_meta=DC(img_meta, cpu_only=True),
@@ -344,18 +361,33 @@ class MyDataSet(CustomDataset):
 
     def applyAugmentations(self, img, gt_bboxes, gt_masks, gt_bboxes_ignore, isTrain):
 
+        bboxesDType = gt_bboxes.dtype
+        masksDType = gt_masks.dtype
+
+        bbox_split = len(gt_bboxes)
+        all_bboxes = np.concatenate((gt_bboxes, gt_bboxes_ignore), axis=0)
+
+        imgaugBBoxes = [imgaug.BoundingBox(x[0], x[1], x[2], x[3]) for x in all_bboxes]
+        imgaugBBoxesOnImage = imgaug.BoundingBoxesOnImage(imgaugBBoxes, img.shape)
+
+        imgaugSegmentationMapsOnImage = imgaug.SegmentationMapsOnImage(gt_masks.transpose(1, 2, 0),
+                                                                       tuple(gt_masks.shape[1:]))
+
+        batch = imgaug.Batch(images=[img], segmentation_maps=imgaugSegmentationMapsOnImage,
+                             bounding_boxes=imgaugBBoxesOnImage)
         aug = self.augmentor(isTrain)
+        augmentedBatch = aug.augment_batch(batch)
 
-        img = aug.augment_image(img)
-        gt_bboxes = self.augmentBoundingBoxes(aug, gt_bboxes, img)
+        img_aug = augmentedBatch.images_aug[0]
+        all_bboxes_aug = [np.array([bbox.x1, bbox.y1, bbox.x2, bbox.y2], dtype=bboxesDType) for bbox in
+                          augmentedBatch.bounding_boxes_aug.bounding_boxes]
+        all_bboxes_aug = np.array(all_bboxes_aug, dtype=bboxesDType)
+        gt_bboxes_aug = all_bboxes_aug[:bbox_split]
+        gt_bboxes_ignore_aug = all_bboxes_aug[bbox_split:]
 
-        if gt_masks is not None:
-            gt_masks = aug.augment_images(gt_masks)
+        masks_aug = augmentedBatch.segmentation_maps_aug.arr.transpose(2, 0, 1).astype(masksDType)
 
-        if gt_bboxes_ignore is not None:
-            gt_bboxes_ignore = self.augmentBoundingBoxes(aug, gt_bboxes_ignore, img)
-
-        return img, gt_bboxes, gt_masks, gt_bboxes_ignore
+        return img_aug, gt_bboxes_aug, masks_aug, gt_bboxes_ignore_aug
 
     def augmentBoundingBoxes(self, aug, gt_bboxes, img):
         imgaugBBoxes = [imgaug.BoundingBox(x[0], x[1], x[2], x[3]) for x in gt_bboxes]
@@ -553,3 +585,24 @@ class InstanceSegmentationPredictionBlend(PredictionBlend):
 
         result = (resultLabels, resultConfidences, resultBBoxes, resultMasks)
         return result
+
+
+def applyMasksToImage(img, gt_masks, gt_labels, numColors):
+    masksShape = list(img.shape[:2]) + [1]
+    objColor = 1
+    gtMasksArr = np.zeros(masksShape, dtype=np.int)
+    for i in range(len(gt_labels)):
+        l = gt_labels[i]
+        gtm = gt_masks[i]
+        gtMasksArr[gtm > 0] = objColor
+        objColor = 1 + (objColor + 1) % (numColors - 1)
+    gtMaskImg = imgaug.SegmentationMapOnImage(gtMasksArr, img.shape).draw_on_image(img)[0]
+    return gtMaskImg
+
+
+def dumpData(bboxesPath, masksPath, img, labels, bboxes, masks, classes):
+    numColors = len(classes)
+    gtMaskImg = applyMasksToImage(img, masks, labels, numColors)
+    imageio.imwrite(masksPath, gtMaskImg)
+    gtBBoxImg = imdraw_det_bboxes(img.copy(), bboxes, labels - 1, class_names=classes)
+    imageio.imwrite(bboxesPath, gtBBoxImg)

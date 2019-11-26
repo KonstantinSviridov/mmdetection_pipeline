@@ -35,7 +35,7 @@ from torch.utils import model_zoo
 import musket_core.generic_config as generic
 from musket_core.builtin_trainables import OutputMeta
 from mmdetection_pipeline.metrics import mmdet_mAP_bbox, mAP_masks
-from mmdetection_pipeline.data import MMdetWritableDS, MyDataSet, InstanceSegmentationPredictionBlend
+from mmdetection_pipeline.data import MMdetWritableDS, DataSetAdapter, InstanceSegmentationPredictionBlend
 from mmdetection_pipeline.callbacks import HookWrapper, CustomCheckpointHook, DrawSamplesHook, KerasCBWrapper
 from mmdetection_pipeline.conversions import convertMMDETModelOutput
 
@@ -483,6 +483,9 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         # z.segmentation_maps_unaug = masks
         pass
 
+    def inject_task_specific_transforms(self, ds, transforms):
+        return ds
+
 #
 #
 # def parse(path) -> PipelineConfig:
@@ -546,12 +549,12 @@ class DetectionStage(generic.Stage):
         if v_steps < 1: v_steps = 1
 
         cfg = model.cfg
-        train_dataset = MyDataSet(ds=trainDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.train)
+        train_dataset = DataSetAdapter(ds=trainDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.train)
         CLASSES = model.classes
         train_dataset.CLASSES = CLASSES
-        val_dataset = MyDataSet(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
+        val_dataset = DataSetAdapter(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
         val_dataset.CLASSES = CLASSES
-        val_dataset1 = MyDataSet(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
+        val_dataset1 = DataSetAdapter(ds=valDS, aug=kf.aug, transforms=kf.transforms, **cfg.data.val)
         val_dataset1.CLASSES = CLASSES
         val_dataset.test_mode = True
         if cfg.checkpoint_config is not None:
