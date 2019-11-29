@@ -46,6 +46,7 @@ class MMDetWrapper:
         self.output_dim = 4
         self.stop_training = False
         self.classes = classes
+        self.model = None
 
     def __call__(self, *args, **kwargs):
         return OutputMeta(self.output_dim, self)
@@ -128,6 +129,9 @@ class MMDetWrapper:
         return result
 
     def load_weights(self, path, val = None):
+
+        if self.model is None:
+            self.compile()
 
         self.cfg.resume_from = path
         checkpoint = load_checkpoint(self.model, path)

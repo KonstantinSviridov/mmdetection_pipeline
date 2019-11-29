@@ -14,7 +14,7 @@ from mmdet.core.post_processing.merge_augs import merge_aug_bboxes, merge_aug_ma
 from typing import Callable
 import networkx as nx
 import imageio
-from callbacks import imdraw_det_bboxes
+from mmdetection_pipeline.callbacks import imdraw_det_bboxes
 
 
 class MMdetWritableDS(CompressibleWriteableDS):
