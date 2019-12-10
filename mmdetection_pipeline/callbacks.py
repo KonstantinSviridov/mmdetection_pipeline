@@ -1,7 +1,7 @@
 from collections import OrderedDict
 import mmcv
 import cv2
-from mmcv.image import imread, imwrite
+import imageio
 from mmcv.visualization.color import color_val
 from mmcv.runner import Runner, Hook
 from mmcv.runner.hooks.checkpoint import CheckpointHook
@@ -129,7 +129,7 @@ class DrawSamplesHook(Hook):
         if not os.path.exists(imFolder):
             os.makedirs(imFolder)
         out_file = os.path.join(imFolder,imgPath)
-        imwrite(exampleImg, out_file)
+        imageio.imwrite(out_file, exampleImg)
 
 
 
@@ -149,7 +149,7 @@ def imdraw_det_bboxes(img,
     """Draw bboxes and class labels (with scores) on an image.
 
     Args:
-        img (str or ndarray): The image to be displayed.
+        img (ndarray): The image to be displayed.
         bboxes (ndarray): Bounding boxes (with scores), shaped (n, 4) or
             (n, 5).
         labels (ndarray): Labels of bboxes.
@@ -168,7 +168,6 @@ def imdraw_det_bboxes(img,
     assert labels.ndim == 1
     assert bboxes.shape[0] == labels.shape[0]
     assert bboxes.shape[1] == 4 or bboxes.shape[1] == 5
-    img = imread(img)
 
     if score_thr > 0:
         assert bboxes.shape[1] == 4
