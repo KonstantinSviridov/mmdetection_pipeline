@@ -214,6 +214,8 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.resetHeads = True
         self.threshold = 0.5
         super().__init__(**atrs)
+        if 'folds_count' not in atrs:
+            self.folds_count = 1
         self.dataset_clazz = datasets.ImageKFoldedDataSet
         self.flipPred=False
         self.final_metrics.extend([mAP_masks.__name__, mmdet_mAP_bbox.__name__])
