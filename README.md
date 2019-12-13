@@ -1,5 +1,9 @@
 # Instance Segmentation Training Pipeline
 
+![Build status](https://travis-ci.com/musket-ml/segmentation_training_pipeline.svg?branch=master)
+
+This package is a part of [Musket ML](https://musket-ml.com/) framework.
+
 Instance Segmentation Pipeline was developed in order to enable using the [MMDetection](https://github.com/open-mmlab/mmdetection)
 framework by means of Musket ML.
 
