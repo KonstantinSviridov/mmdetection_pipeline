@@ -1,2 +1,4 @@
 musket_core>=0.43
+pytorch==1.1.0
+torchvision==0.3.0
 git+https://github.com/open-mmlab/mmdetection.git
