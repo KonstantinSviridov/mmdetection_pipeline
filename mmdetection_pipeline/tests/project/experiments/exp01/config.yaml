@@ -1,0 +1,22 @@
+#%Musket MMDetection 1.0
+augmentation:
+  Fliplr: 0.5
+#  BackgroundReplacer:
+#    path: D:/hfree2
+#    rate: 0.1
+threshold: 0.55
+classes: 46
+shape: [512, 512]
+imagesPerGpu: 1
+
+validationSplit: 0.2
+
+stages:
+  - epochs: 2
+
+dataset:
+  getTrain: []
+
+
+configPath: ./htc_dconv_c3-c5_mstrain_400_1400_x101_64x4d_fpn_20e.py
+weightsPath: open-mmlab://htc_dconv_c3-c5_mstrain_400_1400_x101_64x4d_fpn_20e

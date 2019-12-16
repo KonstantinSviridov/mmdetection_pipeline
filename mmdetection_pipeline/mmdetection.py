@@ -1,3 +1,4 @@
+# import time
 from mmcv import Config
 from mmcv.runner import Runner
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -40,13 +41,14 @@ from mmdetection_pipeline.callbacks import HookWrapper, CustomCheckpointHook, Dr
 from mmdetection_pipeline.conversions import convertMMDETModelOutput
 
 class MMDetWrapper:
-    def __init__(self, cfg:Config, weightsPath:str, classes: [str]):
+    def __init__(self, cfg:Config, weightsPath:str, classes: [str], storage_threshold):
         self.cfg = cfg
         self.weightsPath = weightsPath
         self.output_dim = 4
         self.stop_training = False
         self.classes = classes
         self.model = None
+        self.storage_threshold = storage_threshold
 
     def __call__(self, *args, **kwargs):
         return OutputMeta(self.output_dim, self)
@@ -116,16 +118,30 @@ class MMDetWrapper:
 
     def predict(self, *args, **kwargs):
 
+        # t0 = time.time()
+
         self.model.cfg = self.cfg
         self.model.to(torch.cuda.current_device())
+
+        # t1 = time.time()
 
         input = args[0]
 
         self.model.eval()
         predictions = inference_detector(self.model, input)
+        pred_list = [x for x in predictions]
+
+        # t2 = time.time()
 
         wm = self.model.with_mask
-        result = [convertMMDETModelOutput(x, wm) for x in predictions]
+        result = [convertMMDETModelOutput(x, wm, self.storage_threshold) for x in pred_list]
+
+        # t3 = time.time()
+        #
+        # print(f"MMDetWrapper.predict To GPU: {t1-t0}")
+        # print(f"MMDetWrapper.predict Infer: {t2 - t1}")
+        # print(f"MMDetWrapper.predict Convert: {t3 - t2}")
+
         return result
 
     def load_weights(self, path, val = None):
@@ -213,6 +229,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         self.imagesPerGpu = None
         self.resetHeads = True
         self.threshold = 0.5
+        self.storage_threshold = 0.1
         super().__init__(**atrs)
         if 'folds_count' not in atrs:
             self.folds_count = 1
@@ -349,7 +366,7 @@ class PipelineConfig(generic.GenericImageTaskConfig):
 
     def createNet(self):
         classes = self.get_dataset().root().meta()['CLASSES']
-        result = MMDetWrapper(self.nativeConfig, self.getWeightsPath(), classes)
+        result = MMDetWrapper(self.nativeConfig, self.getWeightsPath(), classes, self.storage_threshold)
 
         return result
 
@@ -448,8 +465,10 @@ class PipelineConfig(generic.GenericImageTaskConfig):
         return InstanceSegmentationPredictionBlend(prs)
 
     def predict_on_batch(self, mdl, ttflips, batch):
+        #t0 = time.time()
         #o1 = np.array(batch.images_unaug)
         res = mdl.predict(batch.images_unaug)
+        # t1 = time.time()
         if ttflips == "Horizontal":
             another = imgaug.augmenters.Fliplr(1.0).augment_images(batch.images_unaug)
             res1 = mdl.predict(np.array(another))
@@ -458,6 +477,9 @@ class PipelineConfig(generic.GenericImageTaskConfig):
             res = (res + res1) / 2.0
         elif ttflips:
             res = self.predict_with_all_augs(mdl, ttflips, batch)
+        # t2 = time.time()
+        # print(f"PipelineConfig.predict_on_batch Predict: {t1 - t0}")
+        # print(f"PipelineConfig.predict_on_batch Image postprocess: {t2 - t1}")
         return res
 
     def withMask(self)->bool:

@@ -15,6 +15,7 @@ from typing import Callable
 import networkx as nx
 import imageio
 from mmdetection_pipeline.callbacks import imdraw_det_bboxes
+# import time
 
 
 class MMdetWritableDS(CompressibleWriteableDS):
@@ -39,6 +40,7 @@ class MMdetWritableDS(CompressibleWriteableDS):
     #     pi.prediction = tresholdedPrediction
 
     def saveItem(self, path:str, item):
+        # t0 = time.time()
         wm = self.withMasks
 
         dire = os.path.dirname(path)
@@ -48,6 +50,7 @@ class MMdetWritableDS(CompressibleWriteableDS):
         labels = item[0]
         probabilities = item[1]
         bboxes = item[2]
+        # t1 = time.time()
         if wm:
             masks = item[3]
             if self.asUints:
@@ -55,21 +58,35 @@ class MMdetWritableDS(CompressibleWriteableDS):
                     masks = (masks * self.scale).astype(np.uint8)
                 else:
                     masks = (masks * self.scale).astype(np.uint16)
-
+            # t2 = time.time()
             np.savez_compressed(file=path, labels=labels, probabilities=probabilities, bboxes=bboxes, masks=masks)
+            # t3 = time.time()
+            # print(f"MMdetWritableDS.saveItem prepare: {t1 - t0}")
+            # print(f"MMdetWritableDS.saveItem convert masks: {t2 - t1}")
+            # print(f"MMdetWritableDS.saveItem save zip: {t3 - t2}")
         else:
             np.savez_compressed(file=path, labels=labels, probabilities=probabilities, bboxes=bboxes)
 
     def loadItem(self, path:str):
+        # t0 = time.time()
         npzFile = np.load(path,allow_pickle=True)
+        # t1 = time.time()
         labels = npzFile['labels']
+        # t2 = time.time()
         probabilities = npzFile['probabilities']
+        # t3 = time.time()
         bboxes = npzFile['bboxes']
+        # t4 = time.time()
         if self.withMasks:
             masks = npzFile['masks']
             if self.asUints:
                 masks=masks.astype(np.float32)/self.scale
-
+            # t5 = time.time()
+            # print(f"MMdetWritableDS.loadItem load file: {t1 - t0}")
+            # print(f"MMdetWritableDS.loadItem get labels: {t2 - t1}")
+            # print(f"MMdetWritableDS.loadItem get probabilities: {t3 - t2}")
+            # print(f"MMdetWritableDS.loadItem get bboxes: {t4 - t3}")
+            # print(f"MMdetWritableDS.loadItem get masks: {t5 - t4}")
             return (labels, probabilities, bboxes, masks)
         else:
             return (labels, probabilities, bboxes)

@@ -1,7 +1,8 @@
 import numpy as np
 from pycocotools import mask as mask_util
+# import time
 
-def convertMMDETModelOutput(pred, withMasks):
+def convertMMDETModelOutput(pred, withMasks, threshold):
     labels = []
     probabilities = []
     resultBBoxes = []
@@ -9,6 +10,8 @@ def convertMMDETModelOutput(pred, withMasks):
     picBBboxes = pred[0] if withMasks else pred
     if withMasks:
         picMasks = pred[1]
+    
+    # t_decode = 0
     for label in range(len(picBBboxes)):
         bboxes = picBBboxes[label]
         if len(bboxes) == 0:
@@ -23,14 +26,20 @@ def convertMMDETModelOutput(pred, withMasks):
 
         for i in range(l):
             predBB = bboxes[i]
-            bb = predBB[:4]
             prob = predBB[4]
+            if prob < threshold:
+                continue
+            bb = predBB[:4]
             labels.append(label)
             probabilities.append(prob)
             resultBBoxes.append(bb)
             if withMasks:
+                # t0 = time.time()
                 decodedMask = mask_util.decode(masks[i])
+                # t1 = time.time()
+                # t_decode += (t1-t0)
                 resultMasks.append(decodedMask)
+#    print(f"Masks decode: {t_decode}")
     labels = np.array(labels, dtype=np.int16)
     probabilities = np.array(probabilities)
     resultBBoxes = np.array(resultBBoxes).reshape((-1,4))

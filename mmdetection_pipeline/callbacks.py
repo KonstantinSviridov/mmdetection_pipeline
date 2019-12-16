@@ -46,7 +46,7 @@ class DrawSamplesHook(Hook):
                     return_loss=False, rescale=True, **data_gpu)
 
             withMasks = isinstance(pred,tuple)
-            result = convertMMDETModelOutput(pred,withMasks)
+            result = convertMMDETModelOutput(pred,withMasks, 0.1)
             result = applyTresholdToPrediction(result,withMasks,self.threshold)
             results[idx] = (result, pi)
 
