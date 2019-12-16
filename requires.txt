@@ -1,0 +1,2 @@
+musket_core>=0.43
+git+https://github.com/open-mmlab/mmdetection.git
