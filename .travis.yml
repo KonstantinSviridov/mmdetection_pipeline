@@ -1,4 +1,6 @@
 language: python
+env:
+  - FORCE_CUDA=1
 python:
   - "3.6"      # current default Python on Travis CI
   - "3.7"  
